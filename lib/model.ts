@@ -1,4 +1,4 @@
-// The token radar's model (radar-2): one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model (radar-3): one snapshot of the protocol universe in, one ranked board out.
 //
 // The board ranks every protocol the snapshot records as pre-token that is not a wrapped, staked or
 // bridged product of a token that already trades. The watchlist is the floor, never the ceiling: all
@@ -11,10 +11,13 @@
 //   implied = round( tvl_usd x catMultiple x growthMult x maturityMult x breadthMult )
 //
 //   catMultiple  the median market-cap / TVL of the live-token protocols in the same category
-//                (at least 3 live peers), else the global live median; clamped to [0.05, 1.50].
-//                A category's token is worth what that category's live tokens are worth per
-//                dollar of TVL. No protocol name is ever special-cased: the multiples are
-//                recomputed from the sealed snapshot on every run.
+//                (at least 3 live peers); else the median of the live-token protocols in the same
+//                SECTOR (a group of related categories, at least 3 live peers); else the global
+//                live median; clamped to [0.05, 1.50]. A category's token is worth what that
+//                category's live tokens are worth per dollar of TVL, and where a category has too
+//                few live peers of its own, its sector's live tokens are the next-nearest market
+//                instead of the whole market's median. No protocol name is ever special-cased: the
+//                multiples are recomputed from the sealed snapshot on every run.
 //   growthMult   1 + clamp(change_7d, -60, 150) / 100 x 0.5   (unreported growth counts as 0)
 //   maturityMult 0.70 + min(age_days, 1095) / 1095 x 0.40      (age unknown counts as 365 days)
 //   breadthMult  1 + 0.015 x min(max(chains - 1, 0), 10)
@@ -79,23 +82,28 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
 
-/** One category's calibration: how many live peers set it, and the median multiple they give. */
+/** One category's calibration: how many live peers set it, the median multiple they give, and the
+ * sector that backs it when the category has too few live peers of its own (null when the category
+ * belongs to no sector). */
 export interface CompEntry {
   category: string;
   peers: number;
   median: number;
-  source: 'category' | 'global';
+  source: 'category' | 'sector' | 'global';
+  sector: string | null;
 }
 
-/** The calibration of the whole snapshot: the global median and one entry per board category. */
+/** The calibration of the whole snapshot: the global median, one entry per board category, and one
+ * entry per sector. */
 export interface Calibration {
   global_median: number;
   by_category: Map<string, { peers: number; median: number }>;
+  by_sector: Map<string, { peers: number; median: number }>;
 }
 
 /** A farm step: the action, what it costs, and how long it takes. */
@@ -124,8 +132,9 @@ export interface BoardRow {
   implied_value_usd: number;
   model: {
     category_multiple: number;
-    multiple_source: 'category' | 'global';
+    multiple_source: 'category' | 'sector' | 'global';
     multiple_peers: number;
+    multiple_sector: string | null;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -150,8 +159,9 @@ export interface RadarRow {
   implied_value_usd: number;
   watchlist: boolean;
   category_multiple: number;
-  multiple_source: 'category' | 'global';
+  multiple_source: 'category' | 'sector' | 'global';
   multiple_peers: number;
+  multiple_sector: string | null;
   growth_multiplier: number;
   maturity_multiplier: number;
   breadth_multiplier: number;
@@ -253,12 +263,83 @@ export function isRankable(p: SnapshotProtocol): boolean {
 }
 
 /**
+ * The sector map: each category belongs to exactly one sector, or to none. A sector is used only
+ * when a category has fewer than 3 live peers of its own, and only when the sector itself has at
+ * least 3 live peers; otherwise the global median applies. The sectors group categories by what
+ * the protocols do, so the fallback multiple comes from the nearest market, not the whole market:
+ *
+ * - Lending: protocols that lend and borrow against collateral (lending pools, CDP vaults and
+ *   collateral managers all price the same thing: a dollar lent against locked collateral).
+ * - Yield & Allocation: protocols that allocate capital to earn yield (vaults, yield aggregators,
+ *   risk curators and farms all take deposits and put them to work for a return).
+ * - Staking: protocols that stake or restake assets for yield (liquid staking, restaking and
+ *   staking pools all wrap the same staking yield).
+ * - Trading: venues where assets trade (DEXs, derivatives, options, prediction markets and OTC
+ *   desks all earn from trading flow).
+ * - Bridges & Chains: cross-chain plumbing, the chains themselves, and BTC representations that
+ *   move across chains (all of them are valued as the rails assets move on, not as an app).
+ * - Asset-Backed: tokens backed by off-chain value (RWA, stablecoin wrappers and dual-token
+ *   stablecoins all price the backing, not an app's usage).
+ *
+ * Categories with NO sector stay on the global median when they have fewer than 3 peers:
+ * Payments, Crypto Card Issuer, Insurance, Governance Incentives, AI Agents, Decentralized AI,
+ * NFT Marketplace, Launchpad, Token Locker, and any category not listed above. There is no
+ * catch-all sector: a category with no near neighbours takes the whole market's median, honestly.
+ */
+export const SECTOR_OF_CATEGORY: Map<string, string> = new Map([
+  // Lending: lend/borrow against collateral.
+  ['Lending', 'Lending'],
+  ['CDP', 'Lending'],
+  ['CDP Manager', 'Lending'],
+  ['Collateral Markets', 'Lending'],
+  ['Collateral Management', 'Lending'],
+  ['Uncollateralized Lending', 'Lending'],
+  // Yield & Allocation: allocate capital to earn yield.
+  ['Yield', 'Yield & Allocation'],
+  ['Yield Aggregator', 'Yield & Allocation'],
+  ['Onchain Capital Allocator', 'Yield & Allocation'],
+  ['Risk Curators', 'Yield & Allocation'],
+  ['Liquidity Manager', 'Yield & Allocation'],
+  ['Leveraged Farming', 'Yield & Allocation'],
+  ['Farm', 'Yield & Allocation'],
+  ['CeDeFi', 'Yield & Allocation'],
+  // Staking: stake/restake assets for yield.
+  ['Liquid Staking', 'Staking'],
+  ['Liquid Restaking', 'Staking'],
+  ['Restaking', 'Staking'],
+  ['Staking Pool', 'Staking'],
+  // Trading: venues where assets trade.
+  ['Dexs', 'Trading'],
+  ['Derivatives', 'Trading'],
+  ['Basis Trading', 'Trading'],
+  ['Options', 'Trading'],
+  ['Prediction Market', 'Trading'],
+  ['Interest Rate Derivatives', 'Trading'],
+  ['OTC Marketplace', 'Trading'],
+  // Bridges & Chains: cross-chain plumbing, the chains, and BTC that moves across them.
+  ['Bridge', 'Bridges & Chains'],
+  ['Canonical Bridge', 'Bridges & Chains'],
+  ['Cross Chain Bridge', 'Bridges & Chains'],
+  ['Chain', 'Bridges & Chains'],
+  ['Anchor BTC', 'Bridges & Chains'],
+  ['Decentralized BTC', 'Bridges & Chains'],
+  // Asset-Backed: tokens backed by off-chain value.
+  ['RWA', 'Asset-Backed'],
+  ['Stablecoin Wrapper', 'Asset-Backed'],
+  ['Dual-Token Stablecoin', 'Asset-Backed'],
+  ['DOR', 'Asset-Backed'],
+]);
+
+/**
  * The calibration: for every category, the median market-cap / TVL of its live-token protocols
- * (at least `min_peers` of them), and the global median across all live protocols. A category
- * with too few live peers falls back to the global median, and the dashboard says so.
+ * (at least `min_peers` of them), the same median per sector (grouping the sector's categories'
+ * live protocols), and the global median across all live protocols. A category with too few live
+ * peers falls back to its sector's median when the sector has enough peers, else to the global
+ * median, and the dashboard says which one applied.
  */
 export function buildCalibration(snapshot: Snapshot, model: ModelConstants = MODEL): Calibration {
   const byCategory = new Map<string, number[]>();
+  const bySector = new Map<string, number[]>();
   const all: number[] = [];
   for (const p of snapshot.protocols) {
     if (isPreToken(p)) continue;
@@ -270,6 +351,12 @@ export function buildCalibration(snapshot: Snapshot, model: ModelConstants = MOD
       const list = byCategory.get(p.category) ?? [];
       list.push(ratio);
       byCategory.set(p.category, list);
+      const sector = SECTOR_OF_CATEGORY.get(p.category);
+      if (sector !== undefined) {
+        const sList = bySector.get(sector) ?? [];
+        sList.push(ratio);
+        bySector.set(sector, sList);
+      }
     }
   }
   all.sort((a, b) => a - b);
@@ -280,19 +367,31 @@ export function buildCalibration(snapshot: Snapshot, model: ModelConstants = MOD
     ratios.sort((a, b) => a - b);
     by_category.set(category, { peers: ratios.length, median: median(ratios) });
   }
-  return { global_median: global, by_category };
+  const by_sector = new Map<string, { peers: number; median: number }>();
+  for (const [sector, ratios] of bySector) {
+    if (ratios.length < model.min_peers) continue;
+    ratios.sort((a, b) => a - b);
+    by_sector.set(sector, { peers: ratios.length, median: median(ratios) });
+  }
+  return { global_median: global, by_category, by_sector };
 }
 
-/** The category multiple one protocol gets: its category's median, or the global median. The multiple
- * is rounded to four decimals here, before it scores anything, so the number board.json states is
- * exactly the number the model used: the page recomputes the row from the stated multiple and must
- * land on the same implied value. */
-export function categoryMultiple(p: SnapshotProtocol, calibration: Calibration, model: ModelConstants = MODEL): { multiple: number; source: 'category' | 'global'; peers: number } {
+/** The category multiple one protocol gets: its category's median (at least 3 live peers), else
+ * its sector's median (at least 3 live peers), else the global median. The multiple is rounded to
+ * four decimals here, before it scores anything, so the number board.json states is exactly the
+ * number the model used: the page recomputes the row from the stated multiple and must land on
+ * the same implied value. */
+export function categoryMultiple(p: SnapshotProtocol, calibration: Calibration, model: ModelConstants = MODEL): { multiple: number; source: 'category' | 'sector' | 'global'; peers: number; sector: string | null } {
   const entry = p.category !== null ? calibration.by_category.get(p.category) : undefined;
   if (entry !== undefined) {
-    return { multiple: round4(Math.min(Math.max(entry.median, model.multiple_floor), model.multiple_cap)), source: 'category', peers: entry.peers };
+    return { multiple: round4(Math.min(Math.max(entry.median, model.multiple_floor), model.multiple_cap)), source: 'category', peers: entry.peers, sector: null };
   }
-  return { multiple: round4(Math.min(Math.max(calibration.global_median, model.multiple_floor), model.multiple_cap)), source: 'global', peers: 0 };
+  const sector = p.category !== null ? SECTOR_OF_CATEGORY.get(p.category) : undefined;
+  const sectorEntry = sector !== undefined ? calibration.by_sector.get(sector) : undefined;
+  if (sectorEntry !== undefined) {
+    return { multiple: round4(Math.min(Math.max(sectorEntry.median, model.multiple_floor), model.multiple_cap)), source: 'sector', peers: sectorEntry.peers, sector };
+  }
+  return { multiple: round4(Math.min(Math.max(calibration.global_median, model.multiple_floor), model.multiple_cap)), source: 'global', peers: 0, sector: null };
 }
 
 /** The four multipliers and the implied value one protocol gets under `model` and `calibration`. */
@@ -301,9 +400,9 @@ export function impliedValue(
   asOf: string,
   calibration: Calibration,
   model: ModelConstants = MODEL,
-): { implied: number; multiple: number; source: 'category' | 'global'; peers: number; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
+): { implied: number; multiple: number; source: 'category' | 'sector' | 'global'; peers: number; sector: string | null; growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const { multiple, source, peers } = categoryMultiple(protocol, calibration, model);
+  const { multiple, source, peers, sector } = categoryMultiple(protocol, calibration, model);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
@@ -311,7 +410,7 @@ export function impliedValue(
   const maturityMult = model.maturity_floor + (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
   const breadthMult = 1 + model.breadth_per_chain * Math.min(Math.max(protocol.chains.length - 1, 0), model.breadth_max_chains);
   const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult * breadthMult));
-  return { implied, multiple, source, peers, growthPct, growthMult, maturityMult, breadthMult, age };
+  return { implied, multiple, source, peers, sector, growthPct, growthMult, maturityMult, breadthMult, age };
 }
 
 /** The snapshot's protocol by slug. */
@@ -349,6 +448,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       category_multiple: round4(s.v.multiple),
       multiple_source: s.v.source,
       multiple_peers: s.v.peers,
+      multiple_sector: s.v.sector,
       growth_pct: s.v.growthPct,
       growth_multiplier: round4(s.v.growthMult),
       maturity_multiplier: round4(s.v.maturityMult),
@@ -601,6 +701,7 @@ export function radarRow(row: BoardRow): RadarRow {
     category_multiple: row.model.category_multiple,
     multiple_source: row.model.multiple_source,
     multiple_peers: row.model.multiple_peers,
+    multiple_sector: row.model.multiple_sector,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     breadth_multiplier: row.model.breadth_multiplier,
@@ -617,8 +718,11 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     .sort()
     .map((category) => {
       const entry = calibration.by_category.get(category);
-      if (entry !== undefined) return { category, peers: entry.peers, median: round4(entry.median), source: 'category' as const };
-      return { category, peers: 0, median: round4(calibration.global_median), source: 'global' as const };
+      if (entry !== undefined) return { category, peers: entry.peers, median: round4(entry.median), source: 'category' as const, sector: SECTOR_OF_CATEGORY.get(category) ?? null };
+      const sector = SECTOR_OF_CATEGORY.get(category) ?? null;
+      const sectorEntry = sector !== null ? calibration.by_sector.get(sector) : undefined;
+      if (sectorEntry !== undefined) return { category, peers: sectorEntry.peers, median: round4(sectorEntry.median), source: 'sector' as const, sector };
+      return { category, peers: 0, median: round4(calibration.global_median), source: 'global' as const, sector };
     });
   const radar: RadarData = {
     as_of: snapshot.as_of,
