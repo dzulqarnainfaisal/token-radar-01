@@ -1,4 +1,4 @@
-// Token Radar's dashboard (radar-2). It reads window.RADAR (written beside dashboard/ by main.ts)
+// Token Radar's dashboard (radar-3). It reads window.RADAR (written beside dashboard/ by main.ts)
 // and renders the ranked board, a filterable table, a per-protocol detail drawer with the model's own
 // inputs and the protocol's farm plan, the live-token set and the calibration table. No network:
 // every byte it shows is in data.js.
@@ -390,19 +390,21 @@
   function compsTable() {
     var tbody = el('tbody');
     DATA.comps.forEach(function (c) {
+      var sourceText = c.source === 'category' ? 'category median' : c.source === 'sector' ? 'sector median (fallback)' : 'global median (fallback)';
       tbody.appendChild(el('tr', null,
         el('td', null, el('b', { text: c.category })),
-        el('td', { class: 'num', text: c.source === 'category' ? String(c.peers) : '0 live peers' }),
+        el('td', null, el('span', { text: c.sector || '—' })),
+        el('td', { class: 'num', text: c.source === 'global' ? '0 live peers' : String(c.peers) + (c.source === 'sector' ? ' sector peers' : ' live peers') }),
         el('td', { class: 'num', text: fmtMult(c.median) }),
-        el('td', null, el('span', { class: 'status' + (c.source === 'global' ? ' watch' : ''), text: c.source === 'category' ? 'category median' : 'global median (fallback)' }))
+        el('td', null, el('span', { class: 'status' + (c.source === 'global' ? ' watch' : ''), text: sourceText }))
       ));
     });
     return el('div', { class: 'panel comps' },
       el('h2', { text: 'How each multiple is set' }),
-      el('p', { class: 'sub', text: 'Every category multiple is the median market-cap / TVL of that category\u2019s live-token protocols in the same snapshot (at least 3 live peers). A category with fewer live peers uses the global live median ' + fmtMult(DATA.global_median) + ', and the table says so. No protocol name is special-cased.' }),
+      el('p', { class: 'sub', text: 'Every category multiple is the median market-cap / TVL of that category\u2019s live-token protocols in the same snapshot (at least 3 live peers). A category with fewer live peers falls back to its sector\u2019s median (the median of the live-token protocols in the related categories of that sector, at least 3 sector peers), and a category with neither enough peers of its own nor a sector with enough peers uses the global live median ' + fmtMult(DATA.global_median) + '. The chain is category \u2192 sector \u2192 global, and the table says which one set each multiple. No protocol name is special-cased.' }),
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Live peers' }), el('th', { scope: 'col', text: 'Median multiple' }), el('th', { scope: 'col', text: 'Source' }))),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Sector' }), el('th', { scope: 'col', text: 'Live peers' }), el('th', { scope: 'col', text: 'Median multiple' }), el('th', { scope: 'col', text: 'Source' }))),
           tbody
         )
       )
@@ -417,7 +419,7 @@
       el('div', { class: 'formula' },
         'implied = round( tvl_usd x category_multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + ' + m.breadth_per_chain + ' x min(chains - 1, ' + m.breadth_max_chains + ')) )'
       ),
-      el('p', { class: 'sub', text: 'category_multiple is the median market-cap / TVL of the live-token protocols in the same category (at least ' + m.min_peers + ' peers), else the global live median ' + fmtMult(DATA.global_median) + ', clamped to ' + m.multiple_floor + '–' + m.multiple_cap + '. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. A protocol records no token; the snapshot is not proof it has none. Wrapped, staked and bridged products of tokens that already trade are kept off the board entirely.' })
+      el('p', { class: 'sub', text: 'category_multiple is the median market-cap / TVL of the live-token protocols in the same category (at least ' + m.min_peers + ' peers), else the median of the same sector\u2019s live-token protocols (at least ' + m.min_peers + ' sector peers), else the global live median ' + fmtMult(DATA.global_median) + ', clamped to ' + m.multiple_floor + '–' + m.multiple_cap + '. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. A protocol records no token; the snapshot is not proof it has none. Wrapped, staked and bridged products of tokens that already trade are kept off the board entirely.' })
     );
   }
 
@@ -445,7 +447,7 @@
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: 'Category multiple (' + (row.multiple_source === 'category' ? row.multiple_peers + ' live peers' : 'global fallback') + ')' }), el('b', { class: 'num', text: fmtMult(row.category_multiple) })),
+        el('div', null, el('span', { text: 'Category multiple (' + (row.multiple_source === 'category' ? row.multiple_peers + ' live peers' : row.multiple_source === 'sector' ? (row.multiple_sector || 'sector') + ' sector, ' + row.multiple_peers + ' sector peers' : 'global fallback') + ')' }), el('b', { class: 'num', text: fmtMult(row.category_multiple) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
@@ -453,7 +455,7 @@
         el('div', null, el('span', { text: 'Chains (' + (row.chains || []).length + ')' }), el('b', { class: 'num', text: String(row.breadth_multiplier) })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model)) + (impliedOf(row, DATA.model) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + (comp && comp.source === 'global' ? ' This category has no live peers of its own, so the global live median applies.' : ' This multiple is the median of the live peers in its category.') + ' This is an estimate, not a price.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row, DATA.model)) + (impliedOf(row, DATA.model) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + (row.multiple_source === 'sector' ? ' This category has fewer than 3 live peers of its own, so the ' + (row.multiple_sector || 'sector') + ' sector median applies (' + row.multiple_peers + ' sector peers).' : row.multiple_source === 'global' ? ' This category has no live peers of its own and no sector with enough peers, so the global live median applies.' : ' This multiple is the median of the live peers in its category.') + ' This is an estimate, not a price.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
